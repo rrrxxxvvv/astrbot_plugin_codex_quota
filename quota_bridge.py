@@ -133,6 +133,7 @@ class QuotaStore:
         same = old and old["accountKey"] == current["accountKey"]
         before = {w["key"]: w for w in old["windows"]} if same else {}
         changes = []
+        categories = []
         sampled = datetime.fromisoformat(current["checkedAt"]).timestamp()
         for w in current["windows"]:
             prev = before.get(w["key"])
@@ -140,10 +141,20 @@ class QuotaStore:
                 continue
             rolled = w["resetsAt"] > prev["resetsAt"] and sampled >= prev["resetsAt"]
             if rolled or w["usedPercent"] < prev["usedPercent"]:
-                changes.append(w["label"] + ("：额度周期已重置" if rolled else "：可用额度已增加"))
+                if rolled:
+                    category = "每周额度更新" if w["windowDurationMins"] == 10080 else "五小时额度更新" if w["windowDurationMins"] == 300 else "额度周期更新"
+                    detail = "原定周期已结束，进入新周期"
+                elif sampled < prev["resetsAt"] and w["usedPercent"] == 0 and prev["usedPercent"] > 0:
+                    category = "OpenAI 重置（推测）"
+                    detail = "原定周期尚未结束，用量提前归零；接口未提供重置原因，无法确认是官方重置还是使用重置卡"
+                else:
+                    category = "可用额度增加"
+                    detail = "检测到已用比例下降，接口未提供原因"
+                categories.append(category)
+                changes.append(f'{category} · {w["label"]}：{detail}（已用 {prev["usedPercent"]:g}% → {w["usedPercent"]:g}%）')
         pending = list(self.state.get("pending", [])) if same else []
         if changes:
-            pending.append({"at": current["checkedAt"], "changes": changes})
+            pending.append({"at": current["checkedAt"], "changes": changes, "categories": list(dict.fromkeys(categories))})
         previous = self.state
         self.state = {"snapshot": current, "pending": pending[-100:], "expiryNotified": self.state.get("expiryNotified", {})}
         try:

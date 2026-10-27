@@ -181,7 +181,8 @@ class CodexQuotaPlugin(Star):
                 if not entries:
                     continue
                 changes = list(dict.fromkeys(c for entry in entries for c in entry["changes"]))
-                heading = "重置卡到期提醒" if all(e.get("kind") == "cardExpiry" for e in entries) else "额度更新与提醒"
+                categories = list(dict.fromkeys(c for e in entries for c in (["重置卡到期提醒"] if e.get("kind") == "cardExpiry" else e.get("categories", ["额度更新"]))))
+                heading = " / ".join(categories)
                 text = heading + "\n" + "\n".join(changes) + "\n\n" + format_snapshot(store.state.get("snapshot"))
             try:
                 if self._push_preferences.get(session, True):
