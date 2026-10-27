@@ -23,6 +23,30 @@ def verify_signature(body: bytes, timestamp: str, signature: str, secret: str, n
         return False
 
 
+def notification_settings(raw=None):
+    raw = {} if raw is None else raw
+    if not isinstance(raw, dict):
+        raise ValueError("invalid notification settings")
+    result = {}
+    for key in ("weeklyReset", "offCycleReset", "cardExpiry"):
+        result[key] = raw.get(key, True)
+        if type(result[key]) is not bool:
+            raise ValueError("invalid notification switch")
+    days = raw.get("expiryDays", [7, 1])
+    if not isinstance(days, list) or not 1 <= len(days) <= 10 or any(type(d) is not int or not 1 <= d <= 365 for d in days):
+        raise ValueError("invalid expiry thresholds")
+    result["expiryDays"] = sorted(set(days), reverse=True)
+    return result
+
+
+def notification_type(category):
+    if category == "每周额度更新":
+        return "weeklyReset"
+    if category in ("OpenAI 重置（推测）", "周期外额度重置", "可用额度增加"):
+        return "offCycleReset"
+    return None
+
+
 def validate_snapshot(raw, now=None):
     now = time.time() if now is None else now
     if not isinstance(raw, dict) or raw.get("version") != 2:
@@ -77,7 +101,7 @@ def validate_snapshot(raw, now=None):
             if expiry_at is not None and (type(expiry_at) not in (int, float) or not math.isfinite(expiry_at) or not 0 < expiry_at < 4102444800):
                 raise ValueError("invalid card expiry")
         cards = {"availableCount": cards["availableCount"], "expiresAt": expiry, "cards": [{"id": c["id"], "expiresAt": c.get("expiresAt")} for c in identified]}
-    return {"version": 2, "qq": qq, "accountKey": key, "checkedAt": checked.isoformat(), "windows": clean, "resetCredits": cards}
+    return {"version": 2, "qq": qq, "notifications": notification_settings(raw.get("notifications")), "accountKey": key, "checkedAt": checked.isoformat(), "windows": clean, "resetCredits": cards}
 
 
 def bj_time(value):
@@ -128,7 +152,20 @@ class QuotaStore:
     def accept(self, raw, now=None):
         current = validate_snapshot(raw, now)
         old = self.state.get("snapshot")
-        if old and datetime.fromisoformat(current["checkedAt"]) <= datetime.fromisoformat(old["checkedAt"]):
+        if old and datetime.fromisoformat(current["checkedAt"]) < datetime.fromisoformat(old["checkedAt"]):
+            return False
+        if old and current["checkedAt"] == old["checkedAt"]:
+            if current["accountKey"] != old["accountKey"]:
+                return False
+            previous = copy.deepcopy(self.state)
+            old["notifications"] = current["notifications"]
+            self.filter_pending()
+            if self.state != previous:
+                try:
+                    self.save()
+                except Exception:
+                    self.state = previous
+                    raise
             return False
         same = old and old["accountKey"] == current["accountKey"]
         before = {w["key"]: w for w in old["windows"]} if same else {}
@@ -150,13 +187,16 @@ class QuotaStore:
                 else:
                     category = "可用额度增加"
                     detail = "检测到已用比例下降，接口未提供原因"
-                categories.append(category)
-                changes.append(f'{category} · {w["label"]}：{detail}（已用 {prev["usedPercent"]:g}% → {w["usedPercent"]:g}%）')
+                setting = notification_type(category)
+                if setting is None or current["notifications"][setting]:
+                    categories.append(category)
+                    changes.append(f'{category} · {w["label"]}：{detail}（已用 {prev["usedPercent"]:g}% → {w["usedPercent"]:g}%）')
         pending = list(self.state.get("pending", [])) if same else []
         if changes:
             pending.append({"at": current["checkedAt"], "changes": changes, "categories": list(dict.fromkeys(categories))})
         previous = self.state
         self.state = {"snapshot": current, "pending": pending[-100:], "expiryNotified": self.state.get("expiryNotified", {})}
+        self.filter_pending()
         try:
             self.save()
         except Exception:
@@ -164,26 +204,50 @@ class QuotaStore:
             raise
         return True
 
+    def filter_pending(self):
+        settings = notification_settings((self.state.get("snapshot") or {}).get("notifications"))
+        pending = []
+        for entry in self.state.get("pending", []):
+            if entry.get("kind") == "cardExpiry":
+                seconds = entry.get("thresholdSeconds")
+                if seconds is None:
+                    seconds = 86400 if any("不足一天" in c for c in entry["changes"]) else 7 * 86400
+                if settings["cardExpiry"] and seconds in [d * 86400 for d in settings["expiryDays"]]:
+                    pending.append(entry)
+            else:
+                retained = [c for c in entry["changes"] if settings.get(notification_type(c.split(" · ", 1)[0]), True)]
+                if retained:
+                    item = dict(entry)
+                    item["changes"] = retained
+                    if entry.get("categories"):
+                        item["categories"] = [c for c in entry["categories"] if settings.get(notification_type(c), True)]
+                    pending.append(item)
+        self.state["pending"] = pending
+
     def queue_expiry_reminders(self, now=None):
         now = time.time() if now is None else now
         snap = self.state.get("snapshot")
         if not snap:
             return
         before = copy.deepcopy(self.state)
+        self.filter_pending()
+        settings = notification_settings(snap.get("notifications"))
         credits = snap.get("resetCredits") or {}
         active = {c["id"]: c for c in credits.get("cards", []) if c.get("expiresAt") and c["expiresAt"] > now} if credits.get("availableCount", 0) > 0 else {}
         # Do not deliver queued alerts after the card is used, removed or expires.
         self.state["pending"] = [e for e in self.state.get("pending", []) if e.get("kind") != "cardExpiry" or (e.get("cardId") in active and active[e["cardId"]]["expiresAt"] == e.get("expiresAt"))]
         fresh = 0 <= now - datetime.fromisoformat(snap["checkedAt"]).timestamp() <= 180
         seen = self.state.setdefault("expiryNotified", {})
-        if fresh:
+        if fresh and settings["cardExpiry"]:
             for card in active.values():
                 remaining = card["expiresAt"] - now
-                for seconds, label in ((7 * 86400, "不足一周"), (86400, "不足一天")):
+                for days in settings["expiryDays"]:
+                    seconds = days * 86400
+                    label = "不足一周" if days == 7 else "不足一天" if days == 1 else f"不足 {days} 天"
                     key = f'{snap["accountKey"]}:{card["id"]}:{card["expiresAt"]}:{seconds}'
                     if remaining < seconds and key not in seen:
                         seen[key] = now
-                        self.state["pending"].append({"kind": "cardExpiry", "cardId": card["id"], "expiresAt": card["expiresAt"], "at": datetime.fromtimestamp(now, timezone.utc).isoformat(), "changes": [f'重置卡（{card["id"][:8]}）即将到期：{label}；到期时间：{bj_time(card["expiresAt"])}（北京时间）']})
+                        self.state["pending"].append({"kind": "cardExpiry", "thresholdSeconds": seconds, "cardId": card["id"], "expiresAt": card["expiresAt"], "at": datetime.fromtimestamp(now, timezone.utc).isoformat(), "changes": [f'重置卡（{card["id"][:8]}）即将到期：{label}；到期时间：{bj_time(card["expiresAt"])}（北京时间）']})
         if self.state != before:
             try:
                 self.save()
