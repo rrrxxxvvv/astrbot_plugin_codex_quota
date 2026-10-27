@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+*.log
+*.zip
+/data/
+/accounts/
+/push_preferences.json
+/codex_quota.json
+*_config.json
+/quota-backup-*/
+.DS_Store
+Thumbs.db

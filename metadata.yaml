@@ -1,0 +1,6 @@
+name: astrbot_plugin_codex_quota
+display_name: Codex 额度推送
+desc: 接收桌面额度快照，额度重置或增加时 QQ 私聊推送，并支持主动查询。
+version: v1.3.0
+author: EMan
+repo: https://github.com/rrrxxxvvv/astrbot_plugin_codex_quota

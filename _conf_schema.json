@@ -1,0 +1,24 @@
+{
+  "codex_quota_enabled": {
+    "description": "启用额度接收",
+    "type": "bool",
+    "default": false
+  },
+  "codex_quota_host": {
+    "description": "监听 IP",
+    "type": "string",
+    "default": "0.0.0.0",
+    "hint": "通常保持 0.0.0.0，无需填写公网 IP；公网 IP 填在桌面端。"
+  },
+  "codex_quota_port": {
+    "description": "接收端口",
+    "type": "int",
+    "default": 18765
+  },
+  "codex_quota_secret": {
+    "description": "连接密钥（插件自动生成，复制到桌面端）",
+    "type": "string",
+    "default": "",
+    "hint": "首次加载自动生成并保存；重新打开配置页查看并复制。重启不改变。已有密钥沿用；清空后保存并重载可重新生成，之后需同步更新桌面端。"
+  }
+}
